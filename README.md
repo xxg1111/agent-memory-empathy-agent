@@ -59,7 +59,7 @@ python graph.py
 ![截图6](./screenshot/shot6.png)
 ![截图7](./screenshot/shot7.png)
 ![截图8](./screenshot/shot8.png)
-![截图9](./screenshot/shot9.png)
+
 
 ## 测试报告
 

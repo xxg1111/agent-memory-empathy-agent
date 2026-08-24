@@ -21,8 +21,8 @@ class VectorMemory:
         self.client = chromadb.PersistentClient(path=persist_directory)
         self.collection_name = "dialog_episodic_memory"
         self.collection = self._get_or_create_collection()
-        # 相似度阈值，低于该值的记忆片段直接丢弃，不送入LLM
-        self.SIM_THRESHOLD = 0.72
+        # 修改阈值：降低阈值提高召回率，论文可做调参实验说明
+        self.SIM_THRESHOLD = 0.60
         print("✅ 向量记忆层初始化成功")
 
     def _get_or_create_collection(self):
