@@ -2,6 +2,7 @@ import os
 # 必须放在所有import最前面，镜像环境变量
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 
+
 import uuid
 import time
 from typing import List, Dict, Any, Optional
@@ -41,7 +42,7 @@ class VectorMemory:
             "timestamp": now_ts,
             **meta
         }
-        embedding = self.embedding_model.encode(content).tolist()
+        embedding = self.embedding_model.encode(content, normalize_embeddings=True).tolist()
         self.collection.add(
             ids=[mem_id],
             embeddings=[embedding],
@@ -51,8 +52,8 @@ class VectorMemory:
         print(f"[向量记忆保存] user:{user_id} 内容:{content[:30]}...")
         return mem_id
 
-    def search_memory(self, user_id: str, query: str, top_k: int = 3):
-        query_emb = self.embedding_model.encode(query).tolist()
+    def search_memory(self, user_id: str, query: str, top_k: int = 4):
+        query_emb = self.embedding_model.encode(query, normalize_embeddings=True).tolist()
         res = self.collection.query(
             query_embeddings=[query_emb],
             n_results=top_k,
@@ -74,4 +75,4 @@ class VectorMemory:
 
     # 给empathy事件聚类调用，返回numpy数组向量
     def get_embedding(self, text: str):
-        return self.embedding_model.encode(text)
+        return self.embedding_model.encode(text, normalize_embeddings=True)

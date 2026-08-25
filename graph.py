@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import traceback
 from typing import Dict, List, Any
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
@@ -12,12 +13,15 @@ from langgraph.graph.message import add_messages
 import hdbscan
 import numpy as np
 
+
 from validator import MemoryValidator
 from empathy import EmpathyFilter
 from vector_memory import VectorMemory
 
+
 # ============ 加载环境变量 ============
 load_dotenv()
+
 
 # ============ 配置区 ============
 DB_PATH = "agent_memory.db"
@@ -25,6 +29,7 @@ validator = MemoryValidator(db_path=DB_PATH)
 vector_memory = VectorMemory()
 # ✅关键：传入validator，否则HDBSCAN簇冷却逻辑不会执行
 empathy = EmpathyFilter(vector_memory=vector_memory, validator=validator)
+
 
 # LLM普通对话，流式开关打开
 llm = ChatOpenAI(
@@ -34,6 +39,7 @@ llm = ChatOpenAI(
     temperature=0.3,
     streaming=True
 )
+
 
 # ============ 状态定义 ============
 class AgentState(TypedDict):
@@ -45,6 +51,7 @@ class AgentState(TypedDict):
     recent_raw_dialog: List[str]   # 原始对话兜底缓存
     cluster_id: int                # HDBSCAN输出簇id，-1噪声簇
 
+
 # ============ 节点定义 ============
 def extract_fact_node(state: AgentState):
     user_input = state["user_text"]
@@ -55,6 +62,7 @@ def extract_fact_node(state: AgentState):
 "爱好":字符串，没有为空字符串
 "instant_emotion":只能选 joy / sadness / anger / fear
 "query_history_intent":bool，用户是否在询问自己过往记忆
+
 
 用户输入：{user_input}
 只输出json，不要别的内容。
@@ -74,10 +82,12 @@ def extract_fact_node(state: AgentState):
     return {"fact_extract": fact}
 
 
+
 def vector_memory_node(state: AgentState):
     txt = state["user_text"]
     recall_list = vector_memory.search_memory(user_id="user_001", query=txt, top_k=4)
     return {"recall_memories": recall_list}
+
 
 
 def cluster_node(state: AgentState):
@@ -96,10 +106,20 @@ def cluster_node(state: AgentState):
 
     clusterer = hdbscan.HDBSCAN(min_cluster_size=2, min_samples=1)
     clusterer.fit(arr)
-    current_idx = texts.index(current_text)
+
+    # ✅ 修复bug：不用index()，用enumerate找当前文本下标，防止重复字符串取错位置
+    current_idx = None
+    for idx, s in enumerate(texts):
+        if s == current_text:
+            current_idx = idx
+            break
+    if current_idx is None:
+        return {"cluster_id": -1}
+
     cid = int(clusterer.labels_[current_idx])
-    print(f"[DEBUG‑CLUSTER] HDBSCAN输出cluster_id={cid}")
+    print(f"[DEBUG-CLUSTER] HDBSCAN输出cluster_id={cid}")
     return {"cluster_id": cid}
+
 
 
 def update_emotion_node(state: AgentState):
@@ -114,11 +134,47 @@ def update_emotion_node(state: AgentState):
         raw_recent_dialog=recent_raw,
         cluster_id=state["cluster_id"]
     )
-    # ✅修复key名称 instant_emotion
     print(f"[瞬时情绪] {emotion_result['instant_emotion']}")
     print(f"[长期情绪画像] joy:{emotion_result['baseline']['joy']:.2f} sadness:{emotion_result['baseline']['sadness']:.2f} anger:{emotion_result['baseline']['anger']:.2f} fear:{emotion_result['baseline']['fear']:.2f}")
     print(f"[情绪偏移检测] {emotion_result['delta_desc']}")
     return {"emotion_info": emotion_result}
+
+
+def _build_emotion_observation(baseline: Dict, delta_desc: str, total_score: float) -> str:
+    """
+    把后端情绪数值翻译为自然语言观察块，不传递浮点数给LLM
+    规则：
+    1. 必须 total_score >= MIN_BASELINE_TOTAL(4.0) 样本充足，才输出长期情绪倾向描述
+    2. 情绪波动提示不受4.0门槛限制，只要波动大就追加
+    3. 措辞保守，不使用「持续/长期」等强时序断言
+    """
+    obs_lines = []
+    sad = baseline.get("sadness", 0.0)
+    joy = baseline.get("joy", 0.0)
+    anger = baseline.get("anger", 0.0)
+    fear = baseline.get("fear", 0.0)
+
+    # ✅ 只有积累足够情绪样本，才输出长期倾向
+    if total_score >= EmpathyFilter.MIN_BASELINE_TOTAL:
+        if sad > 0.60:
+            obs_lines.append("用户难过情绪较为突出。")
+        elif joy > 0.60:
+            obs_lines.append("用户整体情绪比较愉悦。")
+        elif anger > 0.60:
+            obs_lines.append("用户当下带有烦躁生气的情绪。")
+        elif fear > 0.60:
+            obs_lines.append("用户当下存在不安担忧的情绪。")
+
+    # 瞬时波动提示：不受样本门槛限制
+    if "波动较大" in delta_desc:
+        obs_lines.append("提示：用户当下情绪波动较大，请给予更多共情安抚。")
+
+    if not obs_lines:
+        return ""
+
+    block = "【系统内部对用户状态的观察】\n"
+    block += "\n".join(obs_lines)
+    return block
 
 
 def generate_reply_node(state: AgentState):
@@ -134,6 +190,10 @@ def generate_reply_node(state: AgentState):
 
     baseline = emo["baseline"]
     delta_desc = emo["delta_desc"]
+    total_score = sum(baseline.values())
+
+    # ✅ 替换：不再直接把joy/sadness浮点数字塞进prompt，改为生成自然语言观察块
+    emo_obs_block = _build_emotion_observation(baseline, delta_desc, total_score)
 
     sys_prompt = f"""
 你是共情对话助手。
@@ -145,21 +205,23 @@ def generate_reply_node(state: AgentState):
 
 【近期对话缓存（兜底，向量记忆为空时参考这里）】
 {buf_str}
+"""
+    # 样本充足、有有效观察才拼接，空则不占token
+    if emo_obs_block:
+        sys_prompt += "\n" + emo_obs_block + "\n"
 
-【用户长期情绪基线】
-joy:{baseline['joy']:.2f}, sadness:{baseline['sadness']:.2f}, anger:{baseline['anger']:.2f}, fear:{baseline['fear']:.2f}
-【情绪偏移提示】{delta_desc}
-
+    sys_prompt += """
 约束：
 1.你必须充分阅读【近期对话缓存】，如果缓存存在历史事件，回复中要体现出你知道这些事情，不要只笼统安慰。
 2.优先参考向量检索记忆；向量记忆为空时，使用【近期对话缓存】作为参考。
 3.只允许使用上面提供的记忆内容，禁止编造用户没有说过的经历。
-4.情绪基线与偏移描述仅用来把握说话语气，不要直接输出数值。
+4.【系统内部对用户状态的观察】仅供把握回复语气，不要直接复述里面的文字。
 5.说话温和有共情，简短自然。
 """
+
     messages = [
-        {"role":"system","content":sys_prompt},
-        {"role":"user","content":user_text}
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_text}
     ]
     stream_resp = llm.stream(messages)
     print("\n🤖 Agent回复: ", end="", flush=True)
@@ -170,7 +232,8 @@ joy:{baseline['joy']:.2f}, sadness:{baseline['sadness']:.2f}, anger:{baseline['a
             print(part, end="", flush=True)
             full_resp += part
     print("\n")
-    return {"messages": [{"role":"assistant","content":full_resp}]}
+    return {"messages": [{"role": "assistant", "content": full_resp}]}
+
 
 # ============ 构建图 ============
 workflow = StateGraph(AgentState)
@@ -189,6 +252,7 @@ workflow.add_edge("update_emotion", "gen_reply")
 workflow.add_edge("gen_reply", END)
 
 app = workflow.compile()
+
 
 # ============ 主交互循环 ============
 def main():
@@ -224,17 +288,23 @@ def main():
         try:
             result = app.invoke(init_state)
 
-            # 你的validator没有upsert_fact，注释，避免报错
-            # f = result.get("fact_extract",{})
-            # if f.get("姓名") or f.get("爱好"):
-            #     validator.upsert_fact(user_id="user_001", name=f.get("姓名",""), hobby=f.get("爱好",""))
+            # ✅ 打开硬事实保存，适配 upsert_fact(fact_key, fact_value)
+            f = result.get("fact_extract", {})
+            name = f.get("姓名", "").strip()
+            hobby = f.get("爱好", "").strip()
+            if name:
+                validator.upsert_fact(user_id="user_001", fact_key="姓名", fact_value=name)
+            if hobby:
+                validator.upsert_fact(user_id="user_001", fact_key="爱好", fact_value=hobby)
 
-            recalls_out = result.get("recall_memories",[])
+            recalls_out = result.get("recall_memories", [])
             print(f"[向量检索] 找到 {len(recalls_out)} 条相关情景记忆")
             print("-"*50)
         except Exception as e:
             print(f"\n🔥Graph运行异常：{e}")
+            traceback.print_exc()
             print("-"*50)
+
 
 if __name__ == "__main__":
     main()

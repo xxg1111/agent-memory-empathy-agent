@@ -84,6 +84,14 @@ class MemoryValidator:
         conn.commit()
         conn.close()
 
+    def upsert_fact(self, user_id: str, fact_key: str, fact_value: str, source_text: str = ""):
+        """
+        graph.py调用入口，适配上层；source_text不传时使用fact_value占位
+        """
+        if not source_text:
+            source_text = fact_value
+        return self.save_fact(user_id, fact_key, fact_value, source_text)
+
     def save_fact(self, user_id: str, key: str, value: str, user_input_text: str):
         """
         保存硬事实

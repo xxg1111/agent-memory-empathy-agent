@@ -3,6 +3,7 @@ from typing import Dict, Optional, List
 from datetime import datetime
 import numpy as np
 
+
 class EmpathyFilter:
     """
     路线一：事件向量聚类 + LLM双重判断
@@ -17,15 +18,18 @@ class EmpathyFilter:
     JOY_THRESHOLD = 0.35
     SADNESS_THRESHOLD = 0.35
 
+
     def __init__(self, vector_memory, db_path="agent_memory.db", validator=None):
         self.vector_memory = vector_memory
         self.validator = validator
         self.DB_PATH = db_path
         self._init_table()
 
+
     def _get_conn(self):
         conn = sqlite3.connect(self.DB_PATH, check_same_thread=False)
         return conn
+
 
     def _init_table(self):
         conn = self._get_conn()
@@ -42,6 +46,7 @@ class EmpathyFilter:
         conn.commit()
         conn.close()
 
+
     def _get_profile(self, user_id:str) -> Dict:
         conn = self._get_conn()
         cur = conn.cursor()
@@ -57,11 +62,13 @@ class EmpathyFilter:
         conn.close()
         return profile
 
+
     def _decay_profile(self, profile:Dict) -> Dict:
         out = {}
         for k in self.VALID_EMOTIONS:
             out[k] = profile[k] * self.DECAY_FACTOR
         return out
+
 
     def _save_profile(self, user_id:str, profile:Dict):
         conn = self._get_conn()
@@ -71,6 +78,7 @@ class EmpathyFilter:
         ''',(profile["joy"],profile["sadness"],profile["anger"],profile["fear"],datetime.now().timestamp(),user_id))
         conn.commit()
         conn.close()
+
 
     def update_emotion(self, user_id: str, user_input: str, instant_emotion: str, retrieved_memories: List, raw_recent_dialog: List, cluster_id:int):
         """
@@ -86,6 +94,7 @@ class EmpathyFilter:
         # 时间衰减旧基线
         profile = self._decay_profile(profile)
 
+
         if instant_emotion not in self.VALID_EMOTIONS:
             return {
                 "instant_emotion":"neutral",
@@ -93,11 +102,13 @@ class EmpathyFilter:
                 "delta_desc":"暂无足够历史，重点关注本轮当下情绪"
             }
 
+
         base_weight = 1.0
         # 同一事件簇，降权0.2；噪声簇保持1.0
         if cluster_id != -1 and self.validator is not None:
             base_weight = 0.2
             print(f"[Empathy] 检测到属于同一事件簇 id={cluster_id},权重降为 {base_weight}")
+
 
         delta = 1.0 * base_weight
         profile[instant_emotion] += delta
@@ -105,7 +116,9 @@ class EmpathyFilter:
         for k in profile:
             profile[k] = min(profile[k],10.0)
 
+
         self._save_profile(user_id, profile)
+
 
         total_score = sum(profile.values())
         delta_desc = "暂无足够历史，重点关注本轮当下情绪"
@@ -113,15 +126,18 @@ class EmpathyFilter:
             if profile["joy"] >= self.JOY_THRESHOLD and profile["sadness"] < 0.8:
                 delta_desc = "用户整体心态偏积极"
             elif profile["sadness"] >= self.SADNESS_THRESHOLD and profile["joy"] <0.8:
-                delta_desc = "检测到情绪偏移：用户近期长期处于负面状态"
+                # ✅ 修改：去掉“长期处于负面状态”强语义，与graph.py描述保持一致
+                delta_desc = "检测到情绪偏移：用户难过情绪较为突出"
             else:
                 delta_desc = "用户情绪波动比较明显"
+
 
         return {
             "instant_emotion": instant_emotion,
             "baseline": profile,
             "delta_desc": delta_desc
         }
+
 
     def get_emotion_profile(self,user_id:str):
         return self._get_profile(user_id)

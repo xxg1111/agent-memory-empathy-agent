@@ -29,5 +29,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
 # 本地下载的embedding模型，不上传github
 bge-small-zh-v1.5/
